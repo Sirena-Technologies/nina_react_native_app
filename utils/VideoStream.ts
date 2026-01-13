@@ -69,25 +69,37 @@ export class VideoStream {
       // Set up data handler on the socket directly
       const socket = this.videoClient.getSocket();
       if (socket) {
-        console.log('Video stream socket ready, waiting for data...');
-        
-        socket.on('data', (data: any) => {
-          if (this.isStreaming) {
-            this.handleVideoData(data);
-          }
-        });
+        // Check if socket is actually connected
+        if (this.videoClient.getIsConnected()) {
+          console.log('[VIDEO] Video stream socket ready, waiting for data...');
+          
+          socket.on('data', (data: any) => {
+            if (this.isStreaming) {
+              this.handleVideoData(data);
+            }
+          });
 
-        socket.on('error', (error: any) => {
-          console.error('Video stream socket error:', error);
-          this.isStreaming = false;
-        });
+          socket.on('error', (error: any) => {
+            // Only log if it's not a connection refused error (video might not be enabled)
+            const errorMsg = error?.message || String(error) || '';
+            if (!errorMsg.includes('ECONNREFUSED') && !errorMsg.includes('Connection refused')) {
+              console.error('[VIDEO] Video stream socket error:', error);
+            } else {
+              console.log('[VIDEO] Video stream not available (connection refused - video may not be enabled on robot)');
+            }
+            this.isStreaming = false;
+          });
 
-        socket.on('close', () => {
-          console.log('Video stream socket closed');
+          socket.on('close', () => {
+            console.log('[VIDEO] Video stream socket closed');
+            this.isStreaming = false;
+          });
+        } else {
+          console.log('[VIDEO] Video stream connection failed - video may not be enabled on robot');
           this.isStreaming = false;
-        });
+        }
       } else {
-        console.error('Video client socket not available');
+        console.log('[VIDEO] Video client socket not available');
         this.isStreaming = false;
       }
     } catch (error) {

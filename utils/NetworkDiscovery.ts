@@ -31,6 +31,10 @@ function initializeUdpLibrary(): boolean {
 export interface DiscoveredDevice {
   name: string;
   ip: string;
+  port?: number;
+  deviceState?: string;
+  zoneId?: string;
+  streamUrl?: string;
   macAddress?: string;
 }
 
@@ -38,6 +42,7 @@ export class NetworkDiscovery {
   private socket: any = null;
   private devices: DiscoveredDevice[] = [];
   private isDiscovering: boolean = false;
+  private isSocketClosing: boolean = false;
 
   public async discoverDevices(timeout: number = 2000): Promise<DiscoveredDevice[]> {
     return new Promise((resolve) => {
@@ -100,18 +105,81 @@ export class NetworkDiscovery {
         }
         
         this.socket = socket;
+        this.isSocketClosing = false;
 
         socket.bind(1800, () => {
-          socket.setBroadcast(true);
-          socket.setMulticastTTL(128);
-          
-          try {
-            socket.addMembership('239.255.255.250');
-          } catch (error) {
-            console.error('Error joining multicast group:', error);
+          // Check if socket is still valid and not closing
+          if (this.isSocketClosing || !socket || socket !== this.socket) {
+            console.warn('[UDP] Socket was closed before bind callback completed');
+            return;
           }
 
-          const msg = 'M-SEARCH * HTTP/1.1\r\n';
+          // setBroadcast() - wrap in try-catch to handle closed socket errors
+          try {
+            if (socket && typeof socket.setBroadcast === 'function') {
+              socket.setBroadcast(true);
+            } else {
+              console.warn('[UDP] setBroadcast() not available');
+            }
+          } catch (error: any) {
+            // Socket might be closed - this is expected if discovery was stopped
+            if (error?.message?.includes('closed') || error?.key === 'setBroadcast') {
+              console.warn('[UDP] Socket closed before setBroadcast() - discovery may have been stopped');
+              return;
+            }
+            console.error('[UDP] Error setting broadcast:', error);
+          }
+          
+          // Check again before continuing
+          if (this.isSocketClosing || !socket || socket !== this.socket) {
+            return;
+          }
+          
+          // setMulticastTTL() may not be implemented in react-native-udp
+          // Wrap in try-catch to handle gracefully
+          try {
+            if (socket && typeof socket.setMulticastTTL === 'function') {
+              socket.setMulticastTTL(128);
+            } else {
+              console.warn('[UDP] setMulticastTTL() not available in react-native-udp - continuing without it');
+            }
+          } catch (error: any) {
+            // Method not implemented - this is expected for react-native-udp
+            // Multicast should still work without setting TTL
+            if (error?.message?.includes('closed') || error?.key === 'setMulticastTTL') {
+              console.warn('[UDP] Socket closed before setMulticastTTL()');
+              return;
+            }
+            console.warn('[UDP] setMulticastTTL() not implemented - continuing without it');
+          }
+          
+          // Check again before continuing
+          if (this.isSocketClosing || !socket || socket !== this.socket) {
+            return;
+          }
+          
+          try {
+            if (socket && typeof socket.addMembership === 'function') {
+              socket.addMembership('239.255.255.250');
+            }
+          } catch (error: any) {
+            if (error?.message?.includes('closed') || error?.key === 'addMembership') {
+              console.warn('[UDP] Socket closed before addMembership()');
+              return;
+            }
+            console.error('[UDP] Error joining multicast group:', error);
+          }
+          
+          // Final check before sending
+          if (this.isSocketClosing || !socket || socket !== this.socket) {
+            return;
+          }
+
+          // LSSDP M-SEARCH request format:
+          // M-SEARCH * HTTP/1.1\r\n
+          // HOST: 239.255.255.250:1800\r\n\r\n
+          // PROTOCOL:Version 1.0
+          const msg = 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1800\r\n\r\nPROTOCOL:Version 1.0\r\n';
           // Convert string to buffer/array
           let message: any;
           if (typeof Buffer !== 'undefined') {
@@ -123,13 +191,31 @@ export class NetworkDiscovery {
           const address = '239.255.255.250';
 
           const messageLength = message.length || message.byteLength || msg.length;
-          socket.send(message, 0, messageLength, port, address, (err: any) => {
-            if (err) {
-              console.error('Error sending discovery message:', err);
-              this.isDiscovering = false;
-              resolve(this.devices);
+          
+          // Check socket is still valid before sending
+          if (this.isSocketClosing || !socket || socket !== this.socket) {
+            console.warn('[UDP] Socket closed before send()');
+            return;
+          }
+          
+          try {
+            socket.send(message, 0, messageLength, port, address, (err: any) => {
+              if (err) {
+                // Don't log errors if socket was intentionally closed
+                if (!this.isSocketClosing && !err.message?.includes('closed')) {
+                  console.error('[UDP] Error sending discovery message:', err);
+                }
+                this.isDiscovering = false;
+                resolve(this.devices);
+              }
+            });
+          } catch (error: any) {
+            if (!this.isSocketClosing && !error?.message?.includes('closed')) {
+              console.error('[UDP] Error in send():', error);
             }
-          });
+            this.isDiscovering = false;
+            resolve(this.devices);
+          }
         });
 
         socket.on('message', (msg: any, rinfo: any) => {
@@ -144,11 +230,58 @@ export class NetworkDiscovery {
           } else {
             received = String.fromCharCode.apply(null, Array.from(msg));
           }
-          if (received.includes('DeviceName:')) {
-            const deviceName = received.split('DeviceName:')[1].split('\r\n')[0];
+          // Parse LSSDP M-SEARCH response:
+          // HTTP/1.1 200 OK\r\n
+          // HOST: 239.255.255.250:1800\r\n
+          // PROTOCOL: Version 1.0
+          // DeviceName: Libre Node XXXXX\r\n
+          // DeviceState: M\r\n
+          // PORT: 3333\r\n
+          // ZoneID: XXXX-XXXX-XXXX-XXXX
+          // StreamURL: 239:255:255:251:3000\r\n
+          
+          if (received.includes('HTTP/1.1 200 OK') || received.includes('DeviceName:')) {
+            let deviceName: string | undefined = undefined;
+            if (received.includes('DeviceName:')) {
+              deviceName = received.split('DeviceName:')[1].split('\r\n')[0].trim();
+            }
+            
+            if (!deviceName) {
+              return; // Skip if no device name
+            }
+            
             const deviceIp = rinfo.address;
             
-            // Try to extract MAC address from response if available
+            // Extract PORT
+            let port: number | undefined = undefined;
+            if (received.includes('PORT:')) {
+              try {
+                const portStr = received.split('PORT:')[1].split('\r\n')[0].trim();
+                port = parseInt(portStr, 10);
+              } catch (e) {
+                // Ignore parse errors
+              }
+            }
+            
+            // Extract DeviceState
+            let deviceState: string | undefined = undefined;
+            if (received.includes('DeviceState:')) {
+              deviceState = received.split('DeviceState:')[1].split('\r\n')[0].trim();
+            }
+            
+            // Extract ZoneID
+            let zoneId: string | undefined = undefined;
+            if (received.includes('ZoneID:')) {
+              zoneId = received.split('ZoneID:')[1].split('\r\n')[0].trim();
+            }
+            
+            // Extract StreamURL
+            let streamUrl: string | undefined = undefined;
+            if (received.includes('StreamURL:')) {
+              streamUrl = received.split('StreamURL:')[1].split('\r\n')[0].trim();
+            }
+            
+            // Try to extract MAC address from response if available (not in standard LSSDP)
             let macAddress: string | undefined = undefined;
             if (received.includes('DeviceMAC:')) {
               macAddress = received.split('DeviceMAC:')[1].split('\r\n')[0].trim();
@@ -158,16 +291,16 @@ export class NetworkDiscovery {
               macAddress = received.split('MacAddress:')[1].split('\r\n')[0].trim();
             }
             
-            // If MAC not in response, try to get it via ARP (requires native module)
-            // For now, we'll leave it undefined if not in response
-            // TODO: Implement ARP lookup if needed
-            
             // Check if device already exists
             const exists = this.devices.some(d => d.ip === deviceIp);
             if (!exists) {
               this.devices.push({
                 name: deviceName,
                 ip: deviceIp,
+                port: port,
+                deviceState: deviceState,
+                zoneId: zoneId,
+                streamUrl: streamUrl,
                 macAddress: macAddress,
               });
             }
@@ -175,7 +308,13 @@ export class NetworkDiscovery {
         });
 
         socket.on('error', (err: any) => {
-          console.error('Discovery socket error:', err);
+          // Don't log errors if socket was intentionally closed
+          if (!this.isSocketClosing) {
+            // Only log if it's not a "closed" error
+            if (!err?.message?.includes('closed') && err?.key !== 'setBroadcast') {
+              console.error('[UDP] Discovery socket error:', err);
+            }
+          }
           this.isDiscovering = false;
           resolve(this.devices);
         });
@@ -183,8 +322,14 @@ export class NetworkDiscovery {
         // Set timeout
         setTimeout(() => {
           this.isDiscovering = false;
-          if (socket) {
-            socket.close();
+          this.isSocketClosing = true;
+          if (socket && socket === this.socket) {
+            try {
+              socket.close();
+            } catch (error) {
+              // Socket might already be closed
+              console.warn('[UDP] Error closing socket in timeout:', error);
+            }
           }
           resolve(this.devices);
         }, timeout);
@@ -197,10 +342,16 @@ export class NetworkDiscovery {
   }
 
   public stopDiscovery(): void {
+    this.isSocketClosing = true;
+    this.isDiscovering = false;
     if (this.socket) {
-      this.socket.close();
+      try {
+        this.socket.close();
+      } catch (error) {
+        // Socket might already be closed
+        console.warn('[UDP] Error closing socket in stopDiscovery():', error);
+      }
       this.socket = null;
     }
-    this.isDiscovering = false;
   }
 }

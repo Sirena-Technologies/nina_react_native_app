@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import { NetworkDiscovery, DiscoveredDevice } from '@/utils/NetworkDiscovery';
 export default function DeviceListScreen() {
   const router = useRouter();
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
-  const [isScanning, setIsScanning] = useState(true);
+  const [isScanning, setIsScanning] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showManualEntry, setShowManualEntry] = useState(false);
@@ -30,20 +30,25 @@ export default function DeviceListScreen() {
     setError(null);
     try {
       const discoveredDevices = await discovery.discoverDevices(2000);
-      setDevices(discoveredDevices);
-      if (discoveredDevices.length === 0) {
+      
+      // Update devices list
+      if (discoveredDevices.length > 0) {
+        setDevices(discoveredDevices);
+        setIsScanning(false);
+      } else {
+        // No devices found
         setError('No devices found. Make sure UDP native module is properly linked.');
+        setIsScanning(false);
       }
     } catch (error: any) {
       console.error('Error scanning for devices:', error);
       setError(error?.message || 'Failed to scan for devices. UDP library may not be available.');
-    } finally {
       setIsScanning(false);
     }
   }, []);
 
+  // Cleanup on unmount
   useEffect(() => {
-    scanForDevices();
     return () => {
       discovery.stopDiscovery();
     };
@@ -53,6 +58,10 @@ export default function DeviceListScreen() {
     setRefreshing(true);
     await scanForDevices();
     setRefreshing(false);
+  }, [scanForDevices]);
+
+  const handleSearchPress = useCallback(() => {
+    scanForDevices();
   }, [scanForDevices]);
 
   const handleDevicePress = (device: DiscoveredDevice) => {
@@ -88,10 +97,24 @@ export default function DeviceListScreen() {
       onPress={() => handleDevicePress(item)}
     >
       <Text style={styles.deviceName}>{item.name}</Text>
-      <Text style={styles.deviceIp}>IP: {item.ip}</Text>
-      <Text style={styles.deviceMac}>
-        MAC: {item.macAddress || 'N/A'}
-      </Text>
+      <View style={styles.deviceInfoRow}>
+        <Text style={styles.deviceIp}>IP: {item.ip}</Text>
+        {item.port && (
+          <Text style={styles.devicePort}>Port: {item.port}</Text>
+        )}
+      </View>
+      {item.deviceState && (
+        <Text style={styles.deviceState}>State: {item.deviceState}</Text>
+      )}
+      {item.zoneId && (
+        <Text style={styles.deviceZoneId}>ZoneID: {item.zoneId}</Text>
+      )}
+      {item.streamUrl && (
+        <Text style={styles.deviceStreamUrl}>Stream: {item.streamUrl}</Text>
+      )}
+      {item.macAddress && (
+        <Text style={styles.deviceMac}>MAC: {item.macAddress}</Text>
+      )}
     </TouchableOpacity>
   );
 
@@ -99,9 +122,22 @@ export default function DeviceListScreen() {
     <View style={styles.container}>
       <StatusBar style="light" />
       <View style={styles.header}>
-        <Text style={styles.title}>
-          {isScanning ? 'Scanning for devices...' : devices.length > 0 ? 'Available Devices' : 'No Devices Found'}
-        </Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>
+            {isScanning ? 'Scanning...' : devices.length > 0 ? 'Available Devices' : 'Device Discovery'}
+          </Text>
+          <TouchableOpacity
+            style={[styles.searchButton, isScanning && styles.searchButtonDisabled]}
+            onPress={handleSearchPress}
+            disabled={isScanning}
+          >
+            {isScanning ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.searchButtonText}>Search</Text>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
 
       {isScanning ? (
@@ -129,12 +165,23 @@ export default function DeviceListScreen() {
             }
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No devices found</Text>
-                <Text style={styles.emptySubtext}>Pull down to refresh</Text>
-                {error && (
-                  <Text style={styles.emptySubtext}>
-                    {error}
-                  </Text>
+                {isScanning ? (
+                  <>
+                    <ActivityIndicator size="large" color="#4a9eff" />
+                    <Text style={styles.emptyText}>Scanning for devices...</Text>
+                    <Text style={styles.emptySubtext}>Please wait while we search for robots on your network</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.emptyText}>No devices found</Text>
+                    <Text style={styles.emptySubtext}>Tap "Search" button to scan for devices</Text>
+                    <Text style={styles.emptySubtext}>or pull down to refresh</Text>
+                    {error && (
+                      <Text style={styles.emptySubtext}>
+                        {error}
+                      </Text>
+                    )}
+                  </>
                 )}
               </View>
             }
@@ -205,10 +252,34 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#333',
   },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     color: '#fff',
+    flex: 1,
+  },
+  searchButton: {
+    backgroundColor: '#4a9eff',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    minWidth: 80,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchButtonDisabled: {
+    backgroundColor: '#666',
+    opacity: 0.7,
+  },
+  searchButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
   centerContainer: {
     flex: 1,
@@ -237,10 +308,37 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginBottom: 5,
   },
+  deviceInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 5,
+  },
   deviceIp: {
     fontSize: 14,
     color: '#aaa',
+    flex: 1,
+  },
+  devicePort: {
+    fontSize: 14,
+    color: '#aaa',
+    marginLeft: 10,
+  },
+  deviceState: {
+    fontSize: 12,
+    color: '#4a9eff',
+    marginTop: 4,
+  },
+  deviceZoneId: {
+    fontSize: 12,
+    color: '#888',
     marginTop: 2,
+    fontFamily: 'monospace',
+  },
+  deviceStreamUrl: {
+    fontSize: 12,
+    color: '#888',
+    marginTop: 2,
+    fontFamily: 'monospace',
   },
   deviceMac: {
     fontSize: 12,

@@ -31,7 +31,6 @@ const ACTION_ITEMS: ActionItem[] = [
   { title: 'Namaste', message: 'namaste', toast: 'Nino will do Namaste' },
   { title: 'Point Left', message: 'point_left', toast: 'Nino will Point Left' },
   { title: 'Head Nod', message: 'head_node', toast: 'Nino will Nod Head' },
-  { title: 'Custom Action', message: 'custom_action', toast: 'Nino will perform Custom Action' },
 ];
 
 export default function RemoteScreen() {
@@ -43,31 +42,132 @@ export default function RemoteScreen() {
   const [robot] = useState(new RobotCom());
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [videoStatus, setVideoStatus] = useState<string>('Connecting...');
+  const [isVideoStreaming, setIsVideoStreaming] = useState<boolean>(false);
+  const [tcpConnected, setTcpConnected] = useState<boolean>(false);
   const videoStreamRef = useRef<VideoStream | null>(null);
   const isConnectingRef = useRef<boolean>(false);
+  const connectionCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const retryCountRef = useRef<number>(0);
+  const maxRetries = 3;
+  const asyncCommandSentRef = useRef<boolean>(false); // Prevent multiple async command sends
+
+  const connectToRobot = (retryAttempt: number = 0): void => {
+    if (!ip) return;
+    
+    try {
+      console.log(`[TCP] Attempting connection to ${ip} (attempt ${retryAttempt + 1}/${maxRetries + 1})...`);
+      setVideoStatus(retryAttempt > 0 ? `Reconnecting... (${retryAttempt}/${maxRetries})` : 'Connecting...');
+      setTcpConnected(false);
+      asyncCommandSentRef.current = false; // Reset flag for new connection attempt
+      
+      // Close existing connection if any
+      if (robot.mTcpClient) {
+        robot.mTcpClient.stopClient();
+      }
+      
+      robot.openTcp(ip);
+      
+      if (robot.mTcpClient) {
+        // Wait for connection to be established
+        connectionCheckIntervalRef.current = setInterval(() => {
+          if (robot.mTcpClient && robot.mTcpClient.getIsConnected()) {
+            // Connection successful!
+            if (connectionCheckIntervalRef.current) {
+              clearInterval(connectionCheckIntervalRef.current);
+              connectionCheckIntervalRef.current = null;
+            }
+            if (connectionTimeoutRef.current) {
+              clearTimeout(connectionTimeoutRef.current);
+              connectionTimeoutRef.current = null;
+            }
+            
+            // Only send async command once per connection
+            if (!asyncCommandSentRef.current) {
+              console.log('[TCP] ✓ Connection established successfully');
+              setTcpConnected(true);
+              setVideoStatus('Connected');
+              retryCountRef.current = 0; // Reset retry count on success
+              asyncCommandSentRef.current = true; // Mark as sent
+              
+              // Send async command registration when connection is established
+              setTimeout(() => {
+                robot.sendAsynchronousCommand();
+              }, 200);
+              
+              // Request video connection after TCP is established
+              setTimeout(() => {
+                startVideoStream();
+              }, 500);
+            }
+          }
+        }, 200);
+
+        // Timeout after 10 seconds (increased from 5)
+        connectionTimeoutRef.current = setTimeout(() => {
+          if (connectionCheckIntervalRef.current) {
+            clearInterval(connectionCheckIntervalRef.current);
+            connectionCheckIntervalRef.current = null;
+          }
+          
+          if (robot.mTcpClient && !robot.mTcpClient.getIsConnected()) {
+            console.warn(`[TCP] Connection timeout (attempt ${retryAttempt + 1})`);
+            
+            if (retryAttempt < maxRetries) {
+              // Retry with exponential backoff
+              const delay = Math.min(1000 * Math.pow(2, retryAttempt), 5000); // Max 5 seconds
+              console.log(`[TCP] Retrying in ${delay}ms...`);
+              setVideoStatus(`Connection timeout. Retrying in ${Math.round(delay / 1000)}s...`);
+              
+              setTimeout(() => {
+                connectToRobot(retryAttempt + 1);
+              }, delay);
+            } else {
+              // Max retries reached
+              console.error('[TCP] Max retries reached. Connection failed.');
+              setVideoStatus('Connection failed. Tap to retry.');
+              setTcpConnected(false);
+            }
+          }
+        }, 10000); // 10 second timeout
+      } else {
+        console.warn('[TCP] TCP client not initialized. Native module may not be linked.');
+        setVideoStatus('TCP not available');
+        setTcpConnected(false);
+      }
+    } catch (error) {
+      console.error('[TCP] Error opening TCP connection:', error);
+      setVideoStatus('Connection error. Tap to retry.');
+      setTcpConnected(false);
+      
+      // Retry if we haven't exceeded max retries
+      if (retryAttempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, retryAttempt), 5000);
+        setTimeout(() => {
+          connectToRobot(retryAttempt + 1);
+        }, delay);
+      }
+    }
+  };
 
   useEffect(() => {
     if (ip) {
-      try {
-        robot.openTcp(ip);
-        if (robot.mTcpClient) {
-          // Request video connection after TCP is established
-          setTimeout(() => {
-            startVideoStream();
-          }, 1500);
-        } else {
-          console.warn('TCP client not initialized. Native module may not be linked.');
-          setVideoStatus('TCP not available');
-        }
-      } catch (error) {
-        console.error('Error opening TCP connection:', error);
-        setVideoStatus('Connection error');
-      }
+      connectToRobot(0);
     }
 
     return () => {
+      // Cleanup on unmount
+      if (connectionCheckIntervalRef.current) {
+        clearInterval(connectionCheckIntervalRef.current);
+        connectionCheckIntervalRef.current = null;
+      }
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+        connectionTimeoutRef.current = null;
+      }
       if (videoStreamRef.current) {
         videoStreamRef.current.stopStreaming();
+        videoStreamRef.current = null;
       }
       if (robot.mTcpClient) {
         robot.mTcpClient.stopClient();
@@ -106,9 +206,11 @@ export default function RemoteScreen() {
       await videoStream.startStreaming(videoConfig, (imageData: string) => {
         setVideoUri(imageData);
         setVideoStatus('Streaming');
+        setIsVideoStreaming(true);
       });
 
       setVideoStatus('Streaming');
+      setIsVideoStreaming(true);
     } catch (error) {
       console.error('Error starting video stream:', error);
       setVideoStatus('Stream error - check console');
@@ -120,56 +222,80 @@ export default function RemoteScreen() {
   const handleActionPress = (index: number) => {
     const action = ACTION_ITEMS[index];
     
-    // Show toast message
-    console.log(action.toast);
+    console.log(`[ACTION] User pressed: ${action.title} (${action.message})`);
 
-    // Send asynchronous command
-    if (robot.mTcpClient) {
-      // Check if it's custom_action and send motor positions
-      if (index === 7) {
-        // Custom Action
-        sendCustomAction();
-      } else {
-        // Regular actions - send LUCI command 245 with action message
-        robot.sendLUCICommand(245, action.message, 0);
-      }
-    } else {
-      Alert.alert('Error', 'TCP client not available. Cannot send command.');
+    // Check if TCP client is available and connected
+    if (!robot.mTcpClient) {
+      console.error('[ACTION] TCP client not available');
+      Alert.alert(
+        'Connection Error',
+        'TCP client not available. Cannot send command.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Retry Connection', onPress: () => connectToRobot(0) }
+        ]
+      );
+      return;
+    }
+
+    const isConnected = robot.mTcpClient.getIsConnected();
+    const connectionReady = robot.mTcpClient.getIsConnected() && tcpConnected;
+    
+    console.log(`[ACTION] TCP connection state check:`);
+    console.log(`[ACTION]   - mTcpClient exists: ${!!robot.mTcpClient}`);
+    console.log(`[ACTION]   - getIsConnected(): ${isConnected}`);
+    console.log(`[ACTION]   - tcpConnected state: ${tcpConnected}`);
+    console.log(`[ACTION]   - connectionReady: ${connectionReady}`);
+
+    if (!isConnected) {
+      console.error('[ACTION] ✗ TCP connection not ready (getIsConnected() returned false)');
+      Alert.alert(
+        'Connection Not Ready',
+        'TCP connection is not ready. Would you like to retry the connection?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Retry', onPress: () => connectToRobot(0) }
+        ]
+      );
+      return;
+    }
+
+    if (!tcpConnected) {
+      console.warn('[ACTION] ⚠ tcpConnected state is false, but getIsConnected() is true. Proceeding anyway...');
+      // Don't block - connection might be ready even if state isn't updated
+    }
+
+    // Send LUCI command 245 with action message
+    // Robot logs show CommandType=2 is expected (not 0): "CommandType =2 Command=245"
+    // sendAsynchronousCommand() is already called inside sendLUCICommand() before sending the command
+    console.log(`[ACTION] ✓ Connection verified. Sending command 245 for action: "${action.message}"`);
+    
+    try {
+      // Send command immediately - don't block with Alert
+      // Use mode=2 (CommandType=2) as shown in robot logs
+      robot.sendLUCICommand(245, action.message, 2);
+      console.log(`[ACTION] ✓ sendLUCICommand() called successfully`);
+      
+      // Show toast message after sending (non-blocking)
+      setTimeout(() => {
+        Alert.alert('Action', action.toast, [{ text: 'OK' }]);
+      }, 100);
+    } catch (error) {
+      console.error('[ACTION] ✗ Error calling sendLUCICommand():', error);
+      Alert.alert('Error', `Failed to send command: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
-  const sendCustomAction = () => {
-    // Format: "custom_action|frame1_motors|frame2_motors|frame3_motors|frame4_motors|frame5_motors|frame6_motors|velocity|delays"
-    // Each frame: comma-separated motor positions (11 motors)
-    // Velocity: 60 for all motors
-    // Delays: 500,1000,1000,1500,1000,1000 (ms)
 
-    // Frame 1: Initial Neutral (all 2048)
-    const frame1 = '2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048';
-    
-    // Frame 2: Pose 1 (Lift/Preparation)
-    const frame2 = '2050,2046,2047,2043,2046,2064,1716,2329,2053,2040,2048';
-    
-    // Frame 3: Pose 2 (Main Action Start)
-    const frame3 = '1319,2764,1114,1059,1273,2775,2121,2045,2826,1273,2048';
-    
-    // Frame 4: Pose 3 (Main Action Peak)
-    const frame4 = '1150,2930,1114,1059,1273,2775,2121,2045,2826,1273,2200';
-    
-    // Frame 5: Pose 4 (Return/Transition)
-    const frame5 = '2050,2046,2047,2043,2046,2064,1716,2329,2053,2040,2048';
-    
-    // Frame 6: Final Neutral (all 2048)
-    const frame6 = '2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048';
-    
-    // Velocity: 60 for all motors
-    const velocity = '60,60,60,60,60,60,60,60,60,60,60';
-    
-    // Format the complete message: custom_action|frame1|frame2|frame3|frame4|frame5|frame6|velocity|delays
-    const customActionData = `custom_action|${frame1}|${frame2}|${frame3}|${frame4}|${frame5}|${frame6}|${velocity}|500|1000|1000|1500|1000|1000`;
-    
-    console.log('Sending custom action:', customActionData);
-    robot.sendLUCICommand(245, customActionData, 0);
+  const stopVideoStream = () => {
+    if (videoStreamRef.current) {
+      videoStreamRef.current.stopStreaming();
+      videoStreamRef.current = null;
+      setVideoUri(null);
+      setIsVideoStreaming(false);
+      setVideoStatus('Disconnected');
+      console.log('Video stream stopped');
+    }
   };
 
   const handleDisconnect = () => {
@@ -178,6 +304,10 @@ export default function RemoteScreen() {
       {
         text: 'Disconnect',
         onPress: () => {
+          // Stop video stream first
+          stopVideoStream();
+          
+          // Then disconnect TCP
           if (robot.mTcpClient) {
             robot.mTcpClient.stopClient();
           }
@@ -202,25 +332,68 @@ export default function RemoteScreen() {
       
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>{deviceName || 'Robot Control'}</Text>
-        <Text style={styles.headerSubtitle}>IP: {ip}</Text>
+        <View style={styles.headerTop}>
+          <Text style={styles.headerTitle}>{deviceName || 'Robot Control'}</Text>
+          <View style={[styles.connectionIndicator, tcpConnected ? styles.connected : styles.disconnected]}>
+            <Text style={styles.connectionIndicatorText}>
+              {tcpConnected ? '●' : '○'}
+            </Text>
+          </View>
+        </View>
+        <Text style={styles.headerSubtitle}>IP: {ip} {tcpConnected ? '• Connected' : '• Connecting...'}</Text>
       </View>
       
       {/* Video Display Area */}
       <View style={styles.videoContainer}>
         {videoUri ? (
-          <Image 
-            source={{ uri: videoUri }} 
-            style={styles.video} 
-            contentFit="contain"
-            transition={100}
-          />
+          <View style={styles.videoWrapper}>
+            <Image 
+              source={{ uri: videoUri }} 
+              style={styles.video} 
+              contentFit="contain"
+              transition={100}
+            />
+            {isVideoStreaming && (
+              <TouchableOpacity 
+                style={styles.videoDisconnectButton}
+                onPress={stopVideoStream}
+              >
+                <Text style={styles.videoDisconnectButtonText}>Stop Video</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         ) : (
           <View style={styles.videoPlaceholder}>
             <Text style={styles.videoPlaceholderText}>{videoStatus}</Text>
             <Text style={styles.videoPlaceholderSubtext}>
-              {videoStatus === 'Connecting...' ? 'Please wait...' : 'Video stream will appear here'}
+              {videoStatus === 'Connecting...' || videoStatus.startsWith('Reconnecting') 
+                ? 'Please wait...' 
+                : videoStatus.includes('timeout') || videoStatus.includes('failed') || videoStatus.includes('error')
+                ? 'Tap to retry connection'
+                : 'Video stream will appear here'}
             </Text>
+            {(videoStatus === 'Disconnected' || 
+              videoStatus.includes('timeout') || 
+              videoStatus.includes('failed') || 
+              videoStatus.includes('error') ||
+              videoStatus.includes('Tap to retry')) && (
+              <TouchableOpacity 
+                style={styles.reconnectVideoButton}
+                onPress={() => {
+                  if (videoStatus.includes('TCP') || videoStatus.includes('Connection')) {
+                    connectToRobot(0);
+                  } else {
+                    startVideoStream();
+                  }
+                }}
+              >
+                <Text style={styles.reconnectVideoButtonText}>
+                  {videoStatus.includes('TCP') || videoStatus.includes('Connection') 
+                    ? 'Retry Connection' 
+                    : 'Reconnect Video'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </View>
@@ -258,11 +431,35 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#333',
   },
+  headerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 5,
+  },
   headerTitle: {
     fontSize: 24,
     fontWeight: 'bold',
     color: '#fff',
-    marginBottom: 5,
+    flex: 1,
+  },
+  connectionIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginLeft: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  connected: {
+    backgroundColor: '#4caf50',
+  },
+  disconnected: {
+    backgroundColor: '#ff9800',
+  },
+  connectionIndicatorText: {
+    fontSize: 8,
+    color: '#fff',
   },
   headerSubtitle: {
     fontSize: 14,
@@ -293,6 +490,38 @@ const styles = StyleSheet.create({
   videoPlaceholderSubtext: {
     color: '#444',
     fontSize: 12,
+  },
+  videoWrapper: {
+    width: '100%',
+    height: '100%',
+    position: 'relative',
+  },
+  videoDisconnectButton: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    backgroundColor: 'rgba(255, 68, 68, 0.8)',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 8,
+    zIndex: 10,
+  },
+  videoDisconnectButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  reconnectVideoButton: {
+    marginTop: 15,
+    backgroundColor: '#4a9eff',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  reconnectVideoButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
   actionsContainer: {
     flex: 1,
