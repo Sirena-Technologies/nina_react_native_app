@@ -24,13 +24,13 @@ interface ActionItem {
 }
 
 const ACTION_ITEMS: ActionItem[] = [
-  { title: 'Neutral', message: 'Neutral', toast: 'Neutralizing Nino' },
-  { title: 'Point Right', message: 'point_right', toast: 'Nino will Point Right' },
-  { title: 'Hello', message: 'hello', toast: 'Nino will say Hello' },
-  { title: 'Relax', message: 'relax', toast: 'Nino will Relax' },
-  { title: 'Namaste', message: 'namaste', toast: 'Nino will do Namaste' },
-  { title: 'Point Left', message: 'point_left', toast: 'Nino will Point Left' },
-  { title: 'Head Nod', message: 'head_node', toast: 'Nino will Nod Head' },
+  { title: 'Action 1', message: 'action1', toast: 'Executing action1' },
+  { title: 'Action 2', message: 'action2', toast: 'Executing action2' },
+  { title: 'Action 3', message: 'action3', toast: 'Executing action3' },
+  { title: 'Action 4', message: 'action4', toast: 'Executing action4' },
+  { title: 'Action 5', message: 'action5', toast: 'Executing action5' },
+  { title: 'Action 6', message: 'action6', toast: 'Executing action6' },
+  { title: 'Action 7', message: 'action7', toast: 'Executing action7' },
 ];
 
 export default function RemoteScreen() {

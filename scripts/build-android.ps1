@@ -20,7 +20,7 @@ Write-Host ""
 Write-Host "Verifying Java..." -ForegroundColor Cyan
 $javaPath = "$env:JAVA_HOME\bin\java.exe"
 if (Test-Path $javaPath) {
-    $javaVersion = & $javaPath -version 2>&1 | Select-Object -First 1
+    $javaVersion = (cmd /c "`"$javaPath`" -version 2>&1") | Select-Object -First 1
     Write-Host "  $javaVersion" -ForegroundColor Green
 } else {
     Write-Host "  ERROR: Java not found!" -ForegroundColor Red

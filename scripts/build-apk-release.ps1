@@ -17,11 +17,11 @@ Write-Host "  JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Gray
 Write-Host "  ANDROID_HOME: $env:ANDROID_HOME" -ForegroundColor Gray
 Write-Host ""
 
-# Verify Java
+# Verify Java (java -version writes to stderr; run via cmd to avoid PowerShell NativeCommandError)
 Write-Host "Verifying Java..." -ForegroundColor Cyan
 $javaPath = "$env:JAVA_HOME\bin\java.exe"
 if (Test-Path $javaPath) {
-    $javaVersion = & $javaPath -version 2>&1 | Select-Object -First 1
+    $javaVersion = (cmd /c "`"$javaPath`" -version 2>&1") | Select-Object -First 1
     Write-Host "  $javaVersion" -ForegroundColor Green
 } else {
     Write-Host "  ERROR: Java not found!" -ForegroundColor Red
@@ -61,6 +61,16 @@ if (-not (Test-Path "android")) {
 
 # Navigate to android directory
 Push-Location android
+
+# Stop Gradle daemons and clear execution-history lock to avoid "already locked by this process"
+Write-Host "Stopping Gradle daemons..." -ForegroundColor Gray
+& .\gradlew.bat --stop 2>$null
+Start-Sleep -Seconds 2
+$execHistory = ".gradle\8.14.3\executionHistory"
+if (Test-Path $execHistory) {
+    Write-Host "Clearing execution history cache (was locked)..." -ForegroundColor Gray
+    Remove-Item -Recurse -Force $execHistory -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "Building Release APK with bundled JavaScript..." -ForegroundColor Cyan

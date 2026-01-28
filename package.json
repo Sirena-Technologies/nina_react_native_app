@@ -11,6 +11,7 @@
     "build:apk:optimized": "powershell -ExecutionPolicy Bypass -File ./scripts/build-apk-optimized.ps1",
     "build:apk:release": "powershell -ExecutionPolicy Bypass -File ./scripts/build-apk-release.ps1",
     "start:metro": "powershell -ExecutionPolicy Bypass -File ./scripts/start-metro.ps1",
+    "run:android:release": "powershell -ExecutionPolicy Bypass -File ./scripts/run-prebuilt-android.ps1",
     "clean:build": "powershell -ExecutionPolicy Bypass -File ./scripts/clean-build.ps1",
     "ios": "expo run:ios",
     "web": "expo start --web",
